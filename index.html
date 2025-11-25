@@ -2,25 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>TMS Status + Override</title>
+<title>TMS Status & Override</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <style>
-/* -------------------------------
-   Global Styles
---------------------------------*/
 body {
     background: #0a0c10;
     color: #e6edf6;
     font-family: Inter, system-ui, sans-serif;
     margin: 0;
     padding: 20px;
-}
-
-h1 {
-    margin-top: 0;
-    font-size: 26px;
-    font-weight: 600;
 }
 
 .card {
@@ -58,13 +49,6 @@ button:disabled {
     cursor: not-allowed;
 }
 
-.results {
-    margin-top: 15px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    white-space: pre-wrap;
-    line-height: 1.35;
-}
-
 .spinner {
     margin-top: 10px;
     display: none;
@@ -72,39 +56,15 @@ button:disabled {
     font-style: italic;
 }
 
+.results {
+    margin-top: 15px;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    line-height: 1.35;
+}
+
 .hidden {
     display: none;
-}
-
-.disabled {
-    opacity: 0.4;
-    pointer-events: none;
-}
-
-/* Raw response block */
-details.raw-block {
-    margin-top: 8px;
-    background: #151c28;
-    padding: 10px;
-    border-radius: 6px;
-    border: 1px solid #1f2a3a;
-}
-details.raw-block summary {
-    cursor: pointer;
-    color: #22d3ee;
-    font-weight: 600;
-}
-
-.success {
-    color: #10b981;
-}
-
-.fail {
-    color: #ef4444;
-}
-
-.neutral {
-    color: #fbbf24;
 }
 </style>
 </head>
@@ -112,9 +72,9 @@ details.raw-block summary {
 
 <h1>TMS Status & Stage Override</h1>
 
-<!-- ==============================
-     TRACE CARD
-=================================-->
+<!-- ==================================
+     TRACE SECTION
+=================================== -->
 <div class="card">
     <label>Enter PRO Numbers (one per line):</label>
     <textarea id="proInput" rows="6" placeholder="61813334&#10;61813333"></textarea>
@@ -126,44 +86,47 @@ details.raw-block summary {
     <div id="traceResults" class="results"></div>
 </div>
 
-
-<!-- ==============================
-     OVERRIDE CARD
-=================================-->
+<!-- ==================================
+     OVERRIDE SECTION
+=================================== -->
 <div class="card hidden" id="overrideCard">
 
     <h2>Override TMS Stage</h2>
 
     <label>Select Stage:</label>
     <select id="overrideStage">
-        <!-- Replace / extend as needed -->
-        <option value="4|Out-For-Delivery">Out-For-Delivery (4)</option>
-        <option value="3|Delivered">Delivered (3)</option>
-        <option value="2|Processing">Processing (2)</option>
-        <option value="1|Arrived">Arrived (1)</option>
+        <option value="-4">overide to Tendered</option>
+        <option value="-3">overide to Load Building</option>
+        <option value="-2">overide to Quote</option>
+        <option value="-1">overide to Cancelled</option>
+        <option value="0">overide to Pickup</option>
+        <option value="1">overide to Linehaul</option>
+        <option value="2">overide to Pickup Complete</option>
+        <option value="3">overide to Linehaul Complete</option>
+        <option value="4">overide to Out-For-Delivery</option>
     </select>
 
     <button id="runOverrideBtn" disabled>Run Override</button>
 
-    <div id="spinnerOverride" class="spinner">Running override + verification...</div>
+    <div id="spinnerOverride" class="spinner">Running override & verification...</div>
 
     <div id="overrideResults" class="results"></div>
 </div>
 
 
 <script>
-/* ========================================================
-   Helper to parse PROs
-=========================================================*/
+// =======================================
+// Utility to parse multi-line PRO input
+// =======================================
 function parsePROs() {
     const raw = document.getElementById("proInput").value.trim();
     if (!raw) return [];
     return raw.split(/\n+/).map(v => v.trim()).filter(Boolean);
 }
 
-/* ========================================================
-   Formatting helpers
-=========================================================*/
+// =======================================
+// Format trace results
+// =======================================
 function formatTrace(results) {
     let out = "";
     for (const r of results) {
@@ -179,6 +142,9 @@ function formatTrace(results) {
     return out;
 }
 
+// =======================================
+// Format override results
+// =======================================
 function formatOverride(results) {
     let out = "";
     for (const r of results) {
@@ -198,9 +164,9 @@ function formatOverride(results) {
     return out;
 }
 
-/* ========================================================
-   1) RUN TRACE
-=========================================================*/
+// =======================================
+// RUN TRACE
+// =======================================
 document.getElementById("runTraceBtn").onclick = async () => {
     const pros = parsePROs();
     if (!pros.length) {
@@ -228,9 +194,7 @@ document.getElementById("runTraceBtn").onclick = async () => {
         if (data.error) {
             document.getElementById("traceResults").textContent = "ERROR: " + data.error;
         } else {
-            document.getElementById("traceResults").textContent =
-                formatTrace(data.results);
-
+            document.getElementById("traceResults").textContent = formatTrace(data.results);
             document.getElementById("overrideCard").classList.remove("hidden");
             document.getElementById("runOverrideBtn").disabled = false;
         }
@@ -243,15 +207,12 @@ document.getElementById("runTraceBtn").onclick = async () => {
     document.getElementById("runTraceBtn").disabled = false;
 };
 
-
-/* ========================================================
-   2) RUN OVERRIDE (AFTER TRACE)
-=========================================================*/
+// =======================================
+// RUN OVERRIDE
+// =======================================
 document.getElementById("runOverrideBtn").onclick = async () => {
     const pros = parsePROs();
-
-    const stageVal = document.getElementById("overrideStage").value;
-    const [stage_code, stage_label] = stageVal.split("|");
+    const stage_code = Number(document.getElementById("overrideStage").value);
 
     document.getElementById("runOverrideBtn").disabled = true;
     document.getElementById("spinnerOverride").style.display = "block";
@@ -266,8 +227,7 @@ document.getElementById("runOverrideBtn").onclick = async () => {
                 mode: "override",
                 override: {
                     enabled: true,
-                    stage_code: Number(stage_code),
-                    stage_label: stage_label
+                    stage_code
                 }
             })
         });
@@ -275,16 +235,13 @@ document.getElementById("runOverrideBtn").onclick = async () => {
         const data = await res.json();
 
         if (data.error) {
-            document.getElementById("overrideResults").textContent =
-                "ERROR: " + data.error;
+            document.getElementById("overrideResults").textContent = "ERROR: " + data.error;
         } else {
-            document.getElementById("overrideResults").textContent =
-                formatOverride(data.results);
+            document.getElementById("overrideResults").textContent = formatOverride(data.results);
         }
 
     } catch (err) {
-        document.getElementById("overrideResults").textContent =
-            "ERROR: " + err;
+        document.getElementById("overrideResults").textContent = "ERROR: " + err;
     }
 
     document.getElementById("spinnerOverride").style.display = "none";
