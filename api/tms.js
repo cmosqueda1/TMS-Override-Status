@@ -1,6 +1,5 @@
 // api/tms.js
-// TMS-only status lookup using Vercel environment variables
-// Fully restored to the EXACT logic TMS expects
+// Correct TMS-only lookup using original working logic
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -31,26 +30,24 @@ export default async function handler(req, res) {
   }
 
   // ----------------------------
-  // LOGIN TO TMS
+  // LOGIN
   // ----------------------------
   async function loginTMS() {
     const loginURL = `${TMS_BASE_URL}/write/check_login.php`;
-
-    const loginPayload = new URLSearchParams({
-      username: TMS_USER,
-      password: TMS_PASS,
-      UserID: "null",
-      UserToken: "null",
-      pageName: "/index.html"
-    });
 
     const resp = await fetch(loginURL, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
+        "X-Requested-With": "XMLHttpRequest"
       },
-      body: loginPayload
+      body: new URLSearchParams({
+        username: TMS_USER,
+        password: TMS_PASS,
+        UserID: "null",
+        UserToken: "null",
+        pageName: "/index.html"
+      })
     });
 
     const cookie = resp.headers.get("set-cookie");
@@ -58,18 +55,14 @@ export default async function handler(req, res) {
   }
 
   // ----------------------------
-  // REQUEST ORDER STATUS
+  // FETCH TMS RESULTS (REAL ENDPOINT)
   // ----------------------------
-  async function getTMSStatus(pro, cookie) {
-    const url = `${TMS_BASE_URL}/write_new/search_order_basic_v6.php`;
+  async function fetchTmsStatusList(proList, cookie) {
+    const url = `${TMS_BASE_URL}/write_new/search_tms_order_pro_status_v2.php`;
 
-    // FULL REQUIRED PAYLOAD (from working script)
     const payload = new URLSearchParams({
-      input_filter_pro: pro,
       group_id: TMS_GROUP_ID,
-      customer_id: "1",
-      company_id: "1",
-      row_limit: "500",
+      pro_list: JSON.stringify(proList)
     });
 
     const resp = await fetch(url, {
@@ -78,58 +71,48 @@ export default async function handler(req, res) {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         Cookie: cookie,
         Origin: TMS_BASE_URL,
-        Referer: `${TMS_BASE_URL}/tms-platform-order/order`,  // REQUIRED
-        "X-Requested-With": "XMLHttpRequest"
+        Referer: `${TMS_BASE_URL}/tms-platform-order/order`,
+        "X-Requested-With": "XMLHttpRequest",
       },
       body: payload
     });
 
     const text = await resp.text();
 
-    // If TMS returns "File not found." → return null
-    if (text.startsWith("File not found")) {
-      return null;
-    }
-
     return JSON.parse(text);
   }
 
   // LOGIN
-  let login = await loginTMS();
-  const results = [];
+  const login = await loginTMS();
 
-  for (const raw of pros) {
-    const pro = cleanPro(raw);
+  // CLEAN PRO LIST
+  const cleanList = pros.map(cleanPro);
 
-    try {
-      const data = await getTMSStatus(pro, login.cookie);
+  // FETCH TMS DATA ONCE (correct behavior)
+  const tmsRows = await fetchTmsStatusList(cleanList, login.cookie);
 
-      if (!data || !data.data || data.data.length === 0) {
-        results.push({
-          pro,
-          status: "Not Found",
-          order_id: ""
-        });
-        continue;
-      }
-
-      const row = data.data[0];
-
-      results.push({
-        pro,
-        status: mapTMSStatus(row.StatusCode),
-        order_id: row.OrderID || ""
-      });
-
-    } catch (err) {
-      results.push({
-        pro,
-        status: "Error",
-        order_id: "",
-        error: err.message
-      });
-    }
+  // MAP BY PRO
+  const map = new Map();
+  for (const row of tmsRows || []) {
+    map.set(cleanPro(row.tms_order_pro), row);
   }
+
+  const results = cleanList.map((pro) => {
+    const row = map.get(pro);
+    if (!row) {
+      return {
+        pro,
+        status: "Not Found",
+        order_id: ""
+      };
+    }
+
+    return {
+      pro,
+      status: mapTMSStatus(row.StatusCode),
+      order_id: row.OrderID || ""
+    };
+  });
 
   res.status(200).json({ results });
 }
