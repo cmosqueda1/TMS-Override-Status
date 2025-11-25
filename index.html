@@ -33,7 +33,7 @@
         margin:0 auto;
     }
 
-    textarea, input{
+    textarea{
         width:100%;
         padding:12px;
         border-radius:8px;
@@ -88,12 +88,6 @@
     <label><b>Enter PROs (one per line):</b></label>
     <textarea id="pros" rows="6" placeholder="12345678"></textarea>
 
-    <label><b>TMS Username:</b></label>
-    <input id="username" type="text" placeholder="username">
-
-    <label><b>TMS Password:</b></label>
-    <input id="password" type="password" placeholder="password">
-
     <button id="runBtn">Check TMS Status</button>
 
     <div id="spinner">Checking... please wait</div>
@@ -104,8 +98,6 @@
 <script>
 document.getElementById("runBtn").addEventListener("click", async () => {
     const prosRaw = document.getElementById("pros").value.trim();
-    const username = document.getElementById("username").value.trim();
-    const password = document.getElementById("password").value.trim();
     const spinner = document.getElementById("spinner");
     const output = document.getElementById("output");
 
@@ -113,10 +105,6 @@ document.getElementById("runBtn").addEventListener("click", async () => {
 
     if(!prosRaw){
         output.textContent = "Please enter at least one PRO.";
-        return;
-    }
-    if(!username || !password){
-        output.textContent = "Please enter TMS login credentials.";
         return;
     }
 
@@ -128,11 +116,7 @@ document.getElementById("runBtn").addEventListener("click", async () => {
         const resp = await fetch("/api/tms", {
             method:"POST",
             headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({
-                pros,
-                username,
-                password
-            })
+            body: JSON.stringify({ pros })
         });
 
         const data = await resp.json();
@@ -148,7 +132,6 @@ document.getElementById("runBtn").addEventListener("click", async () => {
             text += `PRO: ${row.pro} | Status: ${row.status} | Order ID: ${row.order_id}\n---\n`;
         }
 
-        // remove trailing ---
         text = text.trim().replace(/---$/, "").trim();
 
         output.textContent = text;
