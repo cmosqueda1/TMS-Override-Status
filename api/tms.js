@@ -1,6 +1,6 @@
 // api/tms.js
 // TMS-only status lookup using Vercel environment variables
-// Matches the logic style of the original check-status-pro.js
+// Fully restored to the EXACT logic TMS expects
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -8,9 +8,8 @@ export default async function handler(req, res) {
   }
 
   const { pros } = req.body ?? {};
-
   if (!Array.isArray(pros) || pros.length === 0) {
-    return res.status(400).json({ error: "pros must be a non-empty array" });
+    return res.status(400).json({ error: "PRO list empty" });
   }
 
   const TMS_USER = process.env.TMS_USER;
@@ -18,32 +17,26 @@ export default async function handler(req, res) {
   const TMS_BASE_URL = process.env.TMS_BASE_URL;
   const TMS_GROUP_ID = process.env.TMS_GROUP_ID;
 
-  if (!TMS_USER || !TMS_PASS || !TMS_BASE_URL) {
-    return res.status(500).json({ error: "Missing TMS environment variables" });
-  }
-
-  // Normalize PROs
   const cleanPro = (v) => String(v ?? "").trim();
 
-  // Map status codes to readable values
-  const mapTMSStatus = (code) => {
+  function mapTMSStatus(code) {
     const map = {
-      "P": "Picked Up",
-      "O": "Out For Delivery",
-      "D": "Delivered",
-      "C": "Closed",
-      "X": "Cancelled"
+      P: "Picked Up",
+      O: "Out For Delivery",
+      D: "Delivered",
+      C: "Closed",
+      X: "Cancelled"
     };
     return map[code] || "Unknown";
-  };
+  }
 
-  /**
-   * LOGIN TO TMS
-   */
+  // ----------------------------
+  // LOGIN TO TMS
+  // ----------------------------
   async function loginTMS() {
     const loginURL = `${TMS_BASE_URL}/write/check_login.php`;
 
-    const payload = new URLSearchParams({
+    const loginPayload = new URLSearchParams({
       username: TMS_USER,
       password: TMS_PASS,
       UserID: "null",
@@ -57,28 +50,26 @@ export default async function handler(req, res) {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "X-Requested-With": "XMLHttpRequest",
       },
-      body: payload
+      body: loginPayload
     });
 
     const cookie = resp.headers.get("set-cookie");
-    const data = await resp.json();
-
-    return {
-      cookie,
-      userId: data.UserID || "",
-      userToken: data.UserToken || ""
-    };
+    return { cookie };
   }
 
-  /**
-   * CALL TMS STATUS API
-   */
+  // ----------------------------
+  // REQUEST ORDER STATUS
+  // ----------------------------
   async function getTMSStatus(pro, cookie) {
     const url = `${TMS_BASE_URL}/write_new/search_order_basic_v6.php`;
 
+    // FULL REQUIRED PAYLOAD (from working script)
     const payload = new URLSearchParams({
       input_filter_pro: pro,
-      group_id: TMS_GROUP_ID || ""
+      group_id: TMS_GROUP_ID,
+      customer_id: "1",
+      company_id: "1",
+      row_limit: "500",
     });
 
     const resp = await fetch(url, {
@@ -87,32 +78,33 @@ export default async function handler(req, res) {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         Cookie: cookie,
         Origin: TMS_BASE_URL,
-        Referer: TMS_BASE_URL,
+        Referer: `${TMS_BASE_URL}/tms-platform-order/order`,  // REQUIRED
         "X-Requested-With": "XMLHttpRequest"
       },
       body: payload
     });
 
-    return resp.json();
+    const text = await resp.text();
+
+    // If TMS returns "File not found." → return null
+    if (text.startsWith("File not found")) {
+      return null;
+    }
+
+    return JSON.parse(text);
   }
 
-  // LOGIN FIRST
-  let login;
-  try {
-    login = await loginTMS();
-  } catch (err) {
-    return res.status(500).json({ error: "TMS login failed", details: err.message });
-  }
-
+  // LOGIN
+  let login = await loginTMS();
   const results = [];
 
   for (const raw of pros) {
     const pro = cleanPro(raw);
 
     try {
-      const tmsResp = await getTMSStatus(pro, login.cookie);
+      const data = await getTMSStatus(pro, login.cookie);
 
-      if (!tmsResp?.data || tmsResp.data.length === 0) {
+      if (!data || !data.data || data.data.length === 0) {
         results.push({
           pro,
           status: "Not Found",
@@ -121,7 +113,7 @@ export default async function handler(req, res) {
         continue;
       }
 
-      const row = tmsResp.data[0];
+      const row = data.data[0];
 
       results.push({
         pro,
@@ -139,5 +131,5 @@ export default async function handler(req, res) {
     }
   }
 
-  return res.status(200).json({ results });
+  res.status(200).json({ results });
 }
