@@ -1,5 +1,6 @@
 // api/tms.js
-// TMS-only status lookup using original tmstrace logic (get_tms_trace.php)
+// TMS-only status + per-order stage override
+// Uses original tmstrace logic (get_tms_trace.php) and write_update_tms_order_stage.php
 
 const TMS_USER     = process.env.TMS_USER;
 const TMS_PASS     = process.env.TMS_PASS;
@@ -7,9 +8,10 @@ const TMS_BASE     = process.env.TMS_BASE_URL || "https://tms.freightapp.com";
 const TMS_GROUP_ID = process.env.TMS_GROUP_ID || "28";
 const DEBUG        = process.env.DEBUG === "true";
 
-const TMS_LOGIN_URL = `${TMS_BASE}/write/check_login.php`;
-const TMS_GROUP_URL = `${TMS_BASE}/write_new/write_change_user_group.php`;
-const TMS_TRACE_URL = `${TMS_BASE}/write_new/get_tms_trace.php`;
+const TMS_LOGIN_URL   = `${TMS_BASE}/write/check_login.php`;
+const TMS_GROUP_URL   = `${TMS_BASE}/write_new/write_change_user_group.php`;
+const TMS_TRACE_URL   = `${TMS_BASE}/write_new/get_tms_trace.php`;
+const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`; // from HAR
 
 // Helpers
 const cleanPro = (v) => String(v ?? "").trim();
@@ -21,12 +23,12 @@ const safeLog = (label, payload) => {
 };
 
 /* ========================
-   TMS HELPERS
+   TMS AUTH HELPERS
 ======================== */
 
 async function authTms() {
   if (!TMS_USER || !TMS_PASS) {
-    throw new Error("Missing TMS_USER / TMS_PASS in environment");
+    throw new Error("Missing TMS_USER / TMS_PASS environment variables");
   }
 
   const body = new URLSearchParams();
@@ -46,8 +48,8 @@ async function authTms() {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       "X-Requested-With": "XMLHttpRequest",
-      "Origin": "https://tms.freightapp.com",
-      "Referer": "https://tms.freightapp.com/index.html",
+      "Origin": TMS_BASE,
+      "Referer": `${TMS_BASE}/index.html`,
       "User-Agent": "Mozilla/5.0",
     },
     body,
@@ -61,19 +63,18 @@ async function authTms() {
   });
 
   if (!r.ok) throw new Error(`TMS auth HTTP ${r.status}`);
+
   const j = await r.json().catch(() => ({}));
+  const userId  = j.UserID    ?? j.user_id   ?? null;
+  const token   = j.UserToken ?? j.userToken ?? null;
 
-  const uid   = j.UserID    ?? j.user_id   ?? null;
-  const token = j.UserToken ?? j.userToken ?? null;
-
-  if (!uid || !token) {
+  if (!userId || !token) {
     throw new Error("TMS auth: missing UserID/UserToken");
   }
 
-  // Change group every time for safety (same as original)
-  await tmsChangeGroup(uid, token);
+  await tmsChangeGroup(userId, token);
 
-  return { userId: uid, token };
+  return { userId, token };
 }
 
 async function tmsChangeGroup(userId, userToken) {
@@ -93,8 +94,8 @@ async function tmsChangeGroup(userId, userToken) {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       "X-Requested-With": "XMLHttpRequest",
-      "Origin": "https://tms.freightapp.com",
-      "Referer": "https://tms.freightapp.com/dev.html",
+      "Origin": TMS_BASE,
+      "Referer": `${TMS_BASE}/dev.html`,
       "User-Agent": "Mozilla/5.0",
     },
     body,
@@ -110,15 +111,14 @@ async function tmsChangeGroup(userId, userToken) {
   }
 }
 
-/**
- * Single TMS trace call for ALL PROs at once,
- * using the real browser payload structure (get_tms_trace.php).
- */
+/* ========================
+   TMS TRACE (get_tms_trace.php)
+======================== */
+
 async function tmsTraceForPros(auth, pros) {
   const { userId, token } = auth;
   const body = new URLSearchParams();
 
-  // (Direct copy of original payload structure)
   body.set("input_filter_tracking_num", "");
   body.set("input_billing_reference", "");
   body.set("input_filter_pro", pros.map(cleanPro).join("\n"));
@@ -211,8 +211,8 @@ async function tmsTraceForPros(auth, pros) {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       "X-Requested-With": "XMLHttpRequest",
-      "Origin": "https://tms.freightapp.com",
-      "Referer": "https://tms.freightapp.com/dev.html",
+      "Origin": TMS_BASE,
+      "Referer": `${TMS_BASE}/dev.html`,
       "User-Agent": "Mozilla/5.0",
     },
     body,
@@ -222,7 +222,7 @@ async function tmsTraceForPros(auth, pros) {
   safeLog("TMS TRACE RAW RESPONSE", rawText);
 
   if (!r.ok) {
-    throw new Error(`TMS trace HTTP ${r.status}`);
+    return { error: `TMS trace HTTP ${r.status}`, raw: rawText };
   }
 
   let j;
@@ -246,7 +246,6 @@ async function tmsTraceForPros(auth, pros) {
     return { rows: [], raw: rawText };
   }
 
-  // Build a map from cleaned PRO -> row
   const map = new Map();
   for (const rw of rows) {
     const key = cleanPro(rw.tms_order_pro);
@@ -259,6 +258,88 @@ async function tmsTraceForPros(auth, pros) {
 }
 
 /* ========================
+   TMS STAGE OVERRIDE
+======================== */
+
+/**
+ * Run a TMS stage override for a single order.
+ * - row: the tmstrace row for this order
+ * - options: { stage_code, stage_label, ... }
+ */
+async function runTmsOverride(auth, row, options = {}) {
+  const { userId, token } = auth;
+  const orderId = row.tms_order_id;
+  const currentStageText = row.tms_order_stage || "";
+  const toLabel = options.stage_label || "";
+  const stageCode = options.stage_code;
+
+  if (!orderId || stageCode == null) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "Missing orderId or stage_code",
+    };
+  }
+
+  const body = new URLSearchParams();
+  body.set("order_id", String(orderId));
+  body.set("input_stage_overide", String(stageCode));
+  body.set(
+    "input_action",
+    `Stage overide from ${currentStageText || "Unknown"} to ${toLabel || stageCode}`
+  );
+  body.set("UserID", String(userId));
+  body.set("UserToken", String(token));
+  body.set("pageName", `/dashboard_tms_order.php?order_id=${orderId}`);
+
+  safeLog("TMS STAGE OVERRIDE REQUEST", {
+    url: TMS_OVERRIDE_URL,
+    payload: Object.fromEntries(body),
+  });
+
+  const r = await fetch(TMS_OVERRIDE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest",
+      "Origin": TMS_BASE,
+      "Referer": `${TMS_BASE}/dashboard_tms_order.php?order_id=${orderId}`,
+      "User-Agent": "Mozilla/5.0",
+    },
+    body,
+  });
+
+  const raw = await r.text();
+  safeLog("TMS STAGE OVERRIDE RAW RESPONSE", {
+    status: r.status,
+    raw,
+  });
+
+  if (!r.ok) {
+    return {
+      ok: false,
+      skipped: false,
+      error: `HTTP ${r.status}`,
+      raw,
+    };
+  }
+
+  let json = null;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    // Some endpoints may just return plain "OK"
+  }
+
+  return {
+    ok: true,
+    skipped: false,
+    raw,
+    json,
+  };
+}
+
+/* ========================
    VERCEL HANDLER
 ======================== */
 
@@ -267,7 +348,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { pros = [] } = req.body ?? {};
+  const { pros = [], override } = req.body ?? {};
 
   if (!Array.isArray(pros) || pros.length === 0) {
     return res.status(400).json({ error: "pros must be a non-empty array" });
@@ -276,17 +357,17 @@ export default async function handler(req, res) {
   try {
     const auth = await authTms();
 
-    const { map: tmsMap, raw, error, jsonError } =
-      (await tmsTraceForPros(auth, pros)) ?? {};
+    const traceResult = await tmsTraceForPros(auth, pros);
 
-    // If tmstrace could not parse JSON, surface breakdown
-    if (error) {
+    if (traceResult.error) {
       return res.status(500).json({
         error: "TMS trace failed",
-        details: jsonError,
-        raw_response: raw,
+        details: traceResult.error,
+        raw_response: traceResult.raw,
       });
     }
+
+    const { map: tmsMap, raw } = traceResult;
 
     const results = pros.map((rawPro) => {
       const pro = cleanPro(rawPro);
@@ -300,27 +381,64 @@ export default async function handler(req, res) {
           order_id: "",
           loc: "",
           pu: "",
+          override_ok: false,
+          override_skipped: true,
+          override_error: "No TMS row found",
         };
       }
 
       return {
         pro,
-        // These names mirror your original mapping in check-status-pro.js
-        status: row.tms_order_stage ?? null,     // "Out-For-Delivery"
-        substatus: row.tms_order_status ?? null, // "Processing"
-        order_id: row.tms_order_id ?? null,      // "8134363"
-        loc: row.wa2_code ?? null,               // "EWR"
-        pu: cleanPu(row.fk_tms_order_group_id ?? null)
+        status: row.tms_order_stage ?? null,
+        substatus: row.tms_order_status ?? null,
+        order_id: row.tms_order_id ?? null,
+        loc: row.wa2_code ?? null,
+        pu: cleanPu(row.fk_tms_order_group_id ?? null),
+        override_ok: false,
+        override_skipped: true,
+        override_error: "",
       };
     });
 
-    const responsePayload = {
-      results,
-    };
+    // If override is requested, run one override per found row
+    if (override && override.enabled) {
+      for (const r of results) {
+        if (!r.order_id || r.status === "Not Found") {
+          r.override_skipped = true;
+          if (!r.override_error) {
+            r.override_error = "Missing order_id or status";
+          }
+          continue;
+        }
+
+        const row = tmsMap?.get(cleanPro(r.pro));
+        if (!row) {
+          r.override_skipped = true;
+          r.override_error = "No TMS row for override";
+          continue;
+        }
+
+        try {
+          const o = await runTmsOverride(auth, row, override);
+          r.override_ok = !!o.ok;
+          r.override_skipped = !!o.skipped;
+          r.override_error = o.ok
+            ? ""
+            : o.error || o.reason || "Override failed";
+        } catch (err) {
+          r.override_ok = false;
+          r.override_skipped = false;
+          r.override_error = err?.message || String(err);
+        }
+      }
+    }
+
+    const responsePayload = { results };
 
     if (DEBUG) {
       responsePayload.debug = {
         raw_tms_response: raw,
+        override_enabled: !!(override && override.enabled),
       };
     }
 
