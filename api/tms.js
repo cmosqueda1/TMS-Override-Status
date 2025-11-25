@@ -1,12 +1,12 @@
 // api/tms.js
-// Correct TMS-only lookup using original working logic
+// TMS-only lookup using ORIGINAL TMS logic and headers
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { pros } = req.body ?? {};
+  const { pros = [] } = req.body ?? {};
   if (!Array.isArray(pros) || pros.length === 0) {
     return res.status(400).json({ error: "PRO list empty" });
   }
@@ -18,6 +18,7 @@ export default async function handler(req, res) {
 
   const cleanPro = (v) => String(v ?? "").trim();
 
+  // Status mapping
   function mapTMSStatus(code) {
     const map = {
       P: "Picked Up",
@@ -30,24 +31,30 @@ export default async function handler(req, res) {
   }
 
   // ----------------------------
-  // LOGIN
+  // LOGIN TO TMS (same as original)
   // ----------------------------
   async function loginTMS() {
-    const loginURL = `${TMS_BASE_URL}/write/check_login.php`;
+    const url = `${TMS_BASE_URL}/write/check_login.php`;
 
-    const resp = await fetch(loginURL, {
+    const form = new URLSearchParams({
+      username: TMS_USER,
+      password: TMS_PASS,
+      UserID: "null",
+      UserToken: "null",
+      pageName: "/index.html"
+    });
+
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest"
+        "Content-Type":
+          "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        Origin: TMS_BASE_URL,
+        Referer: `${TMS_BASE_URL}/index.html`,
+        "User-Agent": "Mozilla/5.0"
       },
-      body: new URLSearchParams({
-        username: TMS_USER,
-        password: TMS_PASS,
-        UserID: "null",
-        UserToken: "null",
-        pageName: "/index.html"
-      })
+      body: form
     });
 
     const cookie = resp.headers.get("set-cookie");
@@ -55,11 +62,12 @@ export default async function handler(req, res) {
   }
 
   // ----------------------------
-  // FETCH TMS RESULTS (REAL ENDPOINT)
+  // REAL TMS ENDPOINT (from original file)
   // ----------------------------
   async function fetchTmsStatusList(proList, cookie) {
     const url = `${TMS_BASE_URL}/write_new/search_tms_order_pro_status_v2.php`;
 
+    // Required payload (exact)
     const payload = new URLSearchParams({
       group_id: TMS_GROUP_ID,
       pro_list: JSON.stringify(proList)
@@ -68,16 +76,24 @@ export default async function handler(req, res) {
     const resp = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Content-Type":
+          "application/x-www-form-urlencoded; charset=UTF-8",
         Cookie: cookie,
         Origin: TMS_BASE_URL,
         Referer: `${TMS_BASE_URL}/tms-platform-order/order`,
         "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0",
+        Accept: "application/json, text/javascript, */*; q=0.01"
       },
       body: payload
     });
 
     const text = await resp.text();
+
+    // "File not found" → return empty results
+    if (text.startsWith("File not found")) {
+      return [];
+    }
 
     return JSON.parse(text);
   }
@@ -88,17 +104,19 @@ export default async function handler(req, res) {
   // CLEAN PRO LIST
   const cleanList = pros.map(cleanPro);
 
-  // FETCH TMS DATA ONCE (correct behavior)
+  // FETCH TMS RESULTS ONCE (VERY IMPORTANT)
   const tmsRows = await fetchTmsStatusList(cleanList, login.cookie);
 
-  // MAP BY PRO
-  const map = new Map();
-  for (const row of tmsRows || []) {
-    map.set(cleanPro(row.tms_order_pro), row);
+  // Build lookup map
+  const rowMap = new Map();
+  for (const row of tmsRows) {
+    const pro = cleanPro(row.tms_order_pro);
+    rowMap.set(pro, row);
   }
 
+  // Build output
   const results = cleanList.map((pro) => {
-    const row = map.get(pro);
+    const row = rowMap.get(pro);
     if (!row) {
       return {
         pro,
@@ -114,5 +132,5 @@ export default async function handler(req, res) {
     };
   });
 
-  res.status(200).json({ results });
+  return res.status(200).json({ results });
 }
