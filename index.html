@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TMS Status Checker</title>
+
+<style>
+    :root{
+        --bg:#0a0c10;--card:#0f1420;--text:#e6edf6;--muted:#93a4b7;
+        --accent:#7c3aed;--accent2:#22d3ee;--ok:#10b981;--bad:#ef4444;--border:#1f2a3a;
+    }
+
+    body{
+        margin:0;
+        font-family: Inter, system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        padding:20px;
+    }
+
+    h1{
+        text-align:center;
+        margin-bottom:20px;
+    }
+
+    .card{
+        background:var(--card);
+        border:1px solid var(--border);
+        padding:20px;
+        border-radius:12px;
+        max-width:700px;
+        margin:0 auto;
+    }
+
+    textarea, input{
+        width:100%;
+        padding:12px;
+        border-radius:8px;
+        border:1px solid var(--border);
+        background:#151a26;
+        color:var(--text);
+        margin-bottom:12px;
+        font-size:15px;
+    }
+
+    button{
+        width:100%;
+        padding:14px;
+        background: var(--accent);
+        border:none;
+        color:white;
+        font-size:16px;
+        border-radius:8px;
+        cursor:pointer;
+    }
+
+    button:hover{
+        background:#6b2dd9;
+    }
+
+    #spinner{
+        display:none;
+        margin-top:15px;
+        text-align:center;
+        font-size:14px;
+        color:var(--muted);
+    }
+
+    #output{
+        white-space:pre-wrap;
+        background:#111722;
+        border:1px solid var(--border);
+        padding:15px;
+        margin-top:15px;
+        border-radius:8px;
+        font-size:15px;
+    }
+</style>
+</head>
+
+<body>
+
+<h1>TMS Status Checker</h1>
+
+<div class="card">
+
+    <label><b>Enter PROs (one per line):</b></label>
+    <textarea id="pros" rows="6" placeholder="12345678"></textarea>
+
+    <label><b>TMS Username:</b></label>
+    <input id="username" type="text" placeholder="username">
+
+    <label><b>TMS Password:</b></label>
+    <input id="password" type="password" placeholder="password">
+
+    <button id="runBtn">Check TMS Status</button>
+
+    <div id="spinner">Checking... please wait</div>
+
+    <div id="output"></div>
+</div>
+
+<script>
+document.getElementById("runBtn").addEventListener("click", async () => {
+    const prosRaw = document.getElementById("pros").value.trim();
+    const username = document.getElementById("username").value.trim();
+    const password = document.getElementById("password").value.trim();
+    const spinner = document.getElementById("spinner");
+    const output = document.getElementById("output");
+
+    output.textContent = "";
+
+    if(!prosRaw){
+        output.textContent = "Please enter at least one PRO.";
+        return;
+    }
+    if(!username || !password){
+        output.textContent = "Please enter TMS login credentials.";
+        return;
+    }
+
+    const pros = prosRaw.split("\n").map(v => v.trim()).filter(v => v);
+
+    spinner.style.display = "block";
+
+    try{
+        const resp = await fetch("/api/tms", {
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({
+                pros,
+                username,
+                password
+            })
+        });
+
+        const data = await resp.json();
+        spinner.style.display = "none";
+
+        if(data.error){
+            output.textContent = "ERROR: " + data.error;
+            return;
+        }
+
+        let text = "";
+        for(const row of data.results){
+            text += `PRO: ${row.pro} | Status: ${row.status} | Order ID: ${row.order_id}\n---\n`;
+        }
+
+        // remove trailing ---
+        text = text.trim().replace(/---$/, "").trim();
+
+        output.textContent = text;
+
+    } catch(err){
+        spinner.style.display = "none";
+        output.textContent = "Request failed: " + err.message;
+    }
+});
+</script>
+
+</body>
+</html>
