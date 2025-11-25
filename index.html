@@ -2,145 +2,238 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<title>TMS Status + Override Tool</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TMS Status Checker</title>
 
 <style>
-    :root{
-        --bg:#0a0c10;--card:#0f1420;--text:#e6edf6;--muted:#93a4b7;
-        --accent:#7c3aed;--accent2:#22d3ee;--ok:#10b981;--bad:#ef4444;--border:#1f2a3a;
-    }
-
-    body{
-        margin:0;
+    body {
+        background: #0a0c10;
+        color: #e6edf6;
         font-family: Inter, system-ui, sans-serif;
-        background: var(--bg);
-        color: var(--text);
-        padding:20px;
+        margin: 0;
+        padding: 20px;
     }
 
-    h1{
-        text-align:center;
-        margin-bottom:20px;
+    h1 {
+        margin-top: 0;
+        font-size: 26px;
+        font-weight: 600;
     }
 
-    .card{
-        background:var(--card);
-        border:1px solid var(--border);
-        padding:20px;
-        border-radius:12px;
-        max-width:700px;
-        margin:0 auto;
+    .card {
+        background: #0f1420;
+        border: 1px solid #1f2a3a;
+        padding: 20px;
+        border-radius: 10px;
+        max-width: 900px;
+        margin-top: 20px;
     }
 
-    textarea{
-        width:100%;
-        padding:12px;
-        border-radius:8px;
-        border:1px solid var(--border);
-        background:#151a26;
-        color:var(--text);
-        margin-bottom:12px;
-        font-size:15px;
+    textarea, select, button {
+        width: 100%;
+        font-size: 16px;
+        padding: 10px;
+        margin-top: 8px;
+        border-radius: 6px;
+        border: 1px solid #1f2a3a;
+        background: #151c28;
+        color: #e6edf6;
     }
 
-    button{
-        width:100%;
-        padding:14px;
-        background: var(--accent);
-        border:none;
-        color:white;
-        font-size:16px;
-        border-radius:8px;
-        cursor:pointer;
+    button {
+        background: #7c3aed;
+        cursor: pointer;
+        font-weight: 600;
     }
 
-    button:hover{
-        background:#6b2dd9;
+    button:hover {
+        opacity: .85;
     }
 
-    #spinner{
-        display:none;
-        margin-top:15px;
-        text-align:center;
-        font-size:14px;
-        color:var(--muted);
+    .results {
+        margin-top: 15px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap;
     }
 
-    #output{
-        white-space:pre-wrap;
-        background:#111722;
-        border:1px solid var(--border);
-        padding:15px;
-        margin-top:15px;
-        border-radius:8px;
-        font-size:15px;
+    .stage-ok { color: #10b981; }
+    .stage-fail { color: #ef4444; }
+    .stage-neutral { color: #fbbf24; }
+
+    .hidden { display: none; }
+
+    .spinner {
+        margin-top: 10px;
+        display: none;
+        color: #22d3ee;
+        font-style: italic;
     }
+
 </style>
 </head>
-
 <body>
 
-<h1>TMS Status Checker</h1>
+<h1>TMS Status & Override</h1>
 
 <div class="card">
+    <label>Enter PRO Numbers (one per line):</label>
+    <textarea id="proInput" rows="6" placeholder="61813334&#10;61813333"></textarea>
 
-    <label><b>Enter PROs (one per line):</b></label>
-    <textarea id="pros" rows="6" placeholder="12345678"></textarea>
+    <button id="runTraceBtn">Run Trace</button>
 
-    <button id="runBtn">Check TMS Status</button>
+    <div id="spinnerTrace" class="spinner">Running trace...</div>
 
-    <div id="spinner">Checking... please wait</div>
-
-    <div id="output"></div>
+    <div id="traceResults" class="results"></div>
 </div>
 
+<!-- Override Section -->
+<div class="card hidden" id="overrideCard">
+
+    <h2>Override Stage</h2>
+
+    <label>Select Stage Override:</label>
+    <select id="overrideStage">
+        <!-- These are EXAMPLES — replace with actual stage list -->
+        <option value="4|Out-For-Delivery">Out-For-Delivery (4)</option>
+        <option value="3|Delivered">Delivered (3)</option>
+        <option value="2|Processing">Processing (2)</option>
+        <option value="1|Arrived">Arrived (1)</option>
+    </select>
+
+    <button id="runOverrideBtn">Run Override</button>
+
+    <div id="spinnerOverride" class="spinner">Running override + verification...</div>
+
+    <div id="overrideResults" class="results"></div>
+</div>
+
+
 <script>
-document.getElementById("runBtn").addEventListener("click", async () => {
-    const prosRaw = document.getElementById("pros").value.trim();
-    const spinner = document.getElementById("spinner");
-    const output = document.getElementById("output");
+/********************************************************************
+ * Helpers
+ ********************************************************************/
+function parsePROs() {
+    const raw = document.getElementById("proInput").value.trim();
+    if (!raw) return [];
+    return raw.split(/\n+/).map(v => v.trim()).filter(Boolean);
+}
 
-    output.textContent = "";
+function printTraceResults(results) {
+    let out = "";
+    for (const r of results) {
+        out += `PRO: ${r.pro}\n`;
+        out += ` Status: ${r.status}\n`;
+        out += ` Substatus: ${r.substatus}\n`;
+        out += ` Order ID: ${r.order_id}\n`;
+        out += ` Location: ${r.loc}\n`;
+        out += ` PU: ${r.pu}\n`;
+        out += `---\n`;
+    }
+    return out;
+}
 
-    if(!prosRaw){
-        output.textContent = "Please enter at least one PRO.";
+function printOverrideResults(results) {
+    let out = "";
+    for (const r of results) {
+        out += `PRO: ${r.pro}\n`;
+        out += ` Before: ${r.status}\n`;
+        out += ` Override Applied: ${r.override_ok ? "YES" : "NO"}\n`;
+        out += ` Verified Status: ${r.verified_status}\n`;
+        out += ` Verified: ${r.verified ? "✓ SUCCESS" : "✗ FAILED"}\n\n`;
+    }
+    return out;
+}
+
+/********************************************************************
+ * Step 1 — Run Trace
+ ********************************************************************/
+document.getElementById("runTraceBtn").onclick = async () => {
+    const pros = parsePROs();
+    if (!pros.length) {
+        alert("Please enter at least one PRO.");
         return;
     }
 
-    const pros = prosRaw.split("\n").map(v => v.trim()).filter(v => v);
+    // UI prep
+    document.getElementById("runTraceBtn").disabled = true;
+    document.getElementById("spinnerTrace").style.display = "block";
+    document.getElementById("traceResults").textContent = "";
+    document.getElementById("overrideCard").classList.add("hidden");
 
-    spinner.style.display = "block";
-
-    try{
-        const resp = await fetch("/api/tms", {
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({ pros })
+    try {
+        const res = await fetch("/api/tms", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pros, mode: "trace" })
         });
 
-        const data = await resp.json();
-        spinner.style.display = "none";
+        const data = await res.json();
 
-        if(data.error){
-            output.textContent = "ERROR: " + data.error;
-            return;
+        if (data.error) {
+            document.getElementById("traceResults").textContent = "ERROR: " + data.error;
+        } else {
+            document.getElementById("traceResults").textContent =
+                printTraceResults(data.results);
+
+            // Show Override section
+            document.getElementById("overrideCard").classList.remove("hidden");
         }
 
-        let text = "";
-        for(const row of data.results){
-            text += `PRO: ${row.pro} | Status: ${row.status} | Order ID: ${row.order_id}\n---\n`;
-        }
-
-        text = text.trim().replace(/---$/, "").trim();
-
-        output.textContent = text;
-
-    } catch(err){
-        spinner.style.display = "none";
-        output.textContent = "Request failed: " + err.message;
+    } catch (err) {
+        document.getElementById("traceResults").textContent = "ERROR: " + err;
     }
-});
+
+    // Reset UI
+    document.getElementById("spinnerTrace").style.display = "none";
+    document.getElementById("runTraceBtn").disabled = false;
+};
+
+/********************************************************************
+ * Step 2 — Run Override (after trace)
+ ********************************************************************/
+document.getElementById("runOverrideBtn").onclick = async () => {
+    const pros = parsePROs();
+
+    const stageValue = document.getElementById("overrideStage").value;
+    const [stage_code, stage_label] = stageValue.split("|");
+
+    document.getElementById("runOverrideBtn").disabled = true;
+    document.getElementById("spinnerOverride").style.display = "block";
+    document.getElementById("overrideResults").textContent = "";
+
+    try {
+        const res = await fetch("/api/tms", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                pros,
+                mode: "override",
+                override: {
+                    enabled: true,
+                    stage_code: Number(stage_code),
+                    stage_label: stage_label
+                }
+            })
+        });
+
+        const data = await res.json();
+
+        if (data.error) {
+            document.getElementById("overrideResults").textContent = 
+                "ERROR: " + data.error;
+        } else {
+            document.getElementById("overrideResults").textContent =
+                printOverrideResults(data.results);
+        }
+
+    } catch (err) {
+        document.getElementById("overrideResults").textContent = 
+            "ERROR: " + err;
+    }
+
+    document.getElementById("spinnerOverride").style.display = "none";
+    document.getElementById("runOverrideBtn").disabled = false;
+};
 </script>
 
 </body>
