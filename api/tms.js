@@ -1,9 +1,9 @@
 // api/tms.js
 // TMS-only: trace → optional stage override → verification trace
-// Uses the SAME TMS login / group selection / trace logic as check-status-pro.js
+// Uses same TMS login / group / trace logic as check-status-pro.js
 
 // =======================
-// Helpers
+// Helpers & config
 // =======================
 const cleanPro = (v) => String(v ?? "").trim();
 const cleanPu  = (v) => String(v ?? "").trim();
@@ -14,9 +14,6 @@ const safeLog = (label, payload) => {
   console.log(`\n=== ${label} ===\n`, payload);
 };
 
-// =======================
-// Config
-// =======================
 const TMS_BASE      = process.env.TMS_BASE_URL || "https://tms.freightapp.com";
 const TMS_LOGIN_URL = `${TMS_BASE}/write/check_login.php`;
 const TMS_GROUP_URL = `${TMS_BASE}/write_new/write_change_user_group.php`;
@@ -25,9 +22,62 @@ const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`;
 
 // Defaults to your known credentials if env not set
 const TMS_USER     = process.env.TMS_USER || "cmosqueda";
-const TMS_PASS     = process.env.TMS_PASS || "UWF2NjUyODk="; // base64 string as used by UI
+const TMS_PASS     = process.env.TMS_PASS || "UWF2NjUyODk="; // base64 as UI
 const TMS_GROUP_ID = process.env.TMS_GROUP_ID || "28";
 
+// =======================
+// Stage mapping (code -> target status / description)
+// =======================
+// "action" is the human description; we derive the target status from it.
+const STAGE_OVERRIDES = [
+  { code: -4, action: "overide to Tendered" },
+  { code: -3, action: "overide to Load Building" },
+  { code: -2, action: "overide to Quote" },
+  { code: -1, action: "overide to Cancelled" },
+  { code:  0, action: "overide to Pickup" },
+  { code:  1, action: "overide to Linehaul" },
+  { code:  2, action: "overide to Pickup Complete" },
+  { code:  3, action: "overide to Linehaul Complete" },
+  { code:  4, action: "overide to Out-For-Delivery" }
+];
+
+function getStageInfo(code) {
+  const num = Number(code);
+  return STAGE_OVERRIDES.find((s) => Number(s.code) === num) || null;
+}
+
+/**
+ * Given a stageInfo/action/label, derive the target status text:
+ * "overide to Tendered"  -> "Tendered"
+ * "overide to Out-For-Delivery" -> "Out-For-Delivery"
+ */
+function deriveTargetStatus(stageInfo, override) {
+  // Prefer mapping
+  if (stageInfo && stageInfo.action) {
+    const m = stageInfo.action.match(/overide to\s+(.+)$/i);
+    if (m) return m[1].trim();
+  }
+
+  // Fallback: override.stage_label if frontend sends it
+  if (override && override.stage_label) {
+    return String(override.stage_label).trim();
+  }
+
+  // Fallback: override.action (strip leading phrase if present)
+  if (override && override.action) {
+    const a = String(override.action);
+    const m = a.match(/overide to\s+(.+)$/i);
+    if (m) return m[1].trim();
+    return a.trim();
+  }
+
+  // Last resort: use code-string
+  if (override && override.stage_code != null) {
+    return String(override.stage_code);
+  }
+
+  return null;
+}
 
 // =======================
 // Vercel handler
@@ -46,7 +96,6 @@ export default async function handler(req, res) {
     return;
   }
 
-  // keep order as given, but trim
   const trimmedPros = pros.map(cleanPro).filter(Boolean);
 
   try {
@@ -92,11 +141,13 @@ export default async function handler(req, res) {
       };
     });
 
-    // If this is a TRACE-ONLY call, stop here
+    // If TRACE only or no override enabled – stop here
     if (mode === "trace" || !override || !override.enabled) {
       res.status(200).json({ results });
       return;
     }
+
+    const globalStageInfo = getStageInfo(override.stage_code);
 
     // 2) Run overrides per found order
     for (const r of results) {
@@ -116,11 +167,11 @@ export default async function handler(req, res) {
       }
 
       try {
-        const o = await runTmsOverride(auth, row, override);
-        r.override_ok = o.ok;
-        r.override_skipped = !o.ok && !!o.skipped;
-        if (!o.ok && !r.override_error) {
-          r.override_error = o.error || o.reason || "Override failed";
+        const out = await runTmsOverride(auth, row, override, globalStageInfo);
+        r.override_ok = out.ok;
+        r.override_skipped = !!out.skipped;
+        if (!out.ok && !r.override_error) {
+          r.override_error = out.error || out.reason || "Override failed";
         }
       } catch (err) {
         r.override_ok = false;
@@ -129,7 +180,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3) Verification trace after override
+    // 3) Verification trace
     const tmsMap2 = await tmsTraceForPros(auth, trimmedPros);
 
     for (const r of results) {
@@ -139,11 +190,14 @@ export default async function handler(req, res) {
       r.verified_status = updated.tms_order_stage ?? null;
       r.verified_substatus = updated.tms_order_status ?? null;
 
-      // Verified if the stage now matches the requested "to" stage label
+      const stageInfo = globalStageInfo || getStageInfo(override.stage_code);
+      const expected = deriveTargetStatus(stageInfo, override);
+
       r.verified =
         !!override &&
         !!override.enabled &&
-        updated.tms_order_stage === override.stage_label;
+        !!expected &&
+        updated.tms_order_stage === expected;
     }
 
     res.status(200).json({ results });
@@ -156,11 +210,9 @@ export default async function handler(req, res) {
   }
 }
 
-
 // =======================
-// TMS helpers (copied from original logic)
+// TMS helpers (from original logic)
 // =======================
-
 async function authTms() {
   const body = new URLSearchParams();
   body.set("username", TMS_USER);
@@ -359,7 +411,7 @@ async function tmsTraceForPros(auth, pros) {
 /**
  * Override stage for a single order using write_update_tms_order_stage.php
  */
-async function runTmsOverride(auth, row, override) {
+async function runTmsOverride(auth, row, override, stageInfoFromCaller) {
   const { userId, token } = auth;
   const orderId = row.tms_order_id;
 
@@ -367,12 +419,16 @@ async function runTmsOverride(auth, row, override) {
     return { ok: false, skipped: true, reason: "Missing order_id" };
   }
 
+  const code = Number(override.stage_code);
+  const stageInfo = stageInfoFromCaller || getStageInfo(code);
+  const targetStatus = deriveTargetStatus(stageInfo, override);
+
   const body = new URLSearchParams();
   body.set("order_id", String(orderId));
-  body.set("input_stage_overide", String(override.stage_code));
+  body.set("input_stage_overide", String(code));
   body.set(
     "input_action",
-    `Stage overide from ${row.tms_order_stage || "Unknown"} to ${override.stage_label}`
+    `Stage overide from ${row.tms_order_stage || "Unknown"} to ${targetStatus || code}`
   );
   body.set("UserID", String(userId));
   body.set("UserToken", String(token));
@@ -381,8 +437,8 @@ async function runTmsOverride(auth, row, override) {
   safeLog("TMS OVERRIDE REQUEST", {
     url: TMS_OVERRIDE_URL,
     orderId,
-    stage_code: override.stage_code,
-    stage_label: override.stage_label
+    code,
+    targetStatus
   });
 
   const r = await fetch(TMS_OVERRIDE_URL, {
