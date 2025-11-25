@@ -1,112 +1,107 @@
 // api/tms.js
-// Pure TMS-only status lookup (Login → Search → Return PRO, Status, Order_ID)
+// TMS-only status lookup using Vercel environment variables
+// Matches the logic style of the original check-status-pro.js
 
-const TMS_LOGIN_URL = "https://tms.freightapp.com/write/check_login.php";
-const TMS_STATUS_URL = "https://tms.freightapp.com/write_new/search_order_basic_v6.php";
-
-/**
- * Normalize PRO
- */
-function cleanPro(v) {
-  return String(v ?? "").trim();
-}
-
-/**
- * Map TMS status/stage codes to readable text
- */
-function mapTMSStatus(code) {
-  const map = {
-    "P": "Picked Up",
-    "O": "Out For Delivery",
-    "D": "Delivered",
-    "C": "Closed",
-    "X": "Cancelled"
-  };
-  return map[code] || "Unknown";
-}
-
-/**
- * Login to TMS → return cookie, UserID, UserToken
- */
-async function loginTMS(username, password) {
-  const payload = new URLSearchParams({
-    username,
-    password,
-    UserID: "null",
-    UserToken: "null",
-    pageName: "/index.html"
-  });
-
-  const resp = await fetch(TMS_LOGIN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-Requested-With": "XMLHttpRequest"
-    },
-    body: payload
-  });
-
-  const cookie = resp.headers.get("set-cookie");
-  const data = await resp.json();
-
-  return {
-    userId: data.UserID || "",
-    userToken: data.UserToken || "",
-    cookie
-  };
-}
-
-/**
- * Get TMS status by PRO
- */
-async function getTMSStatus(pro, cookie) {
-  const payload = new URLSearchParams({
-    input_filter_pro: pro
-  });
-
-  const resp = await fetch(TMS_STATUS_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      Cookie: cookie,
-      Origin: "https://tms.freightapp.com",
-      Referer: "https://tms.freightapp.com",
-      "X-Requested-With": "XMLHttpRequest"
-    },
-    body: payload
-  });
-
-  return resp.json();
-}
-
-/**
- * Vercel Handler — receives { pros:[], username, password }
- */
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { pros, username, password } = req.body || {};
+  const { pros } = req.body ?? {};
 
   if (!Array.isArray(pros) || pros.length === 0) {
-    res.status(400).json({ error: "pros must be a non-empty array" });
-    return;
+    return res.status(400).json({ error: "pros must be a non-empty array" });
   }
 
-  if (!username || !password) {
-    res.status(400).json({ error: "Missing TMS login credentials" });
-    return;
+  const TMS_USER = process.env.TMS_USER;
+  const TMS_PASS = process.env.TMS_PASS;
+  const TMS_BASE_URL = process.env.TMS_BASE_URL;
+  const TMS_GROUP_ID = process.env.TMS_GROUP_ID;
+
+  if (!TMS_USER || !TMS_PASS || !TMS_BASE_URL) {
+    return res.status(500).json({ error: "Missing TMS environment variables" });
   }
 
-  // login
+  // Normalize PROs
+  const cleanPro = (v) => String(v ?? "").trim();
+
+  // Map status codes to readable values
+  const mapTMSStatus = (code) => {
+    const map = {
+      "P": "Picked Up",
+      "O": "Out For Delivery",
+      "D": "Delivered",
+      "C": "Closed",
+      "X": "Cancelled"
+    };
+    return map[code] || "Unknown";
+  };
+
+  /**
+   * LOGIN TO TMS
+   */
+  async function loginTMS() {
+    const loginURL = `${TMS_BASE_URL}/write/check_login.php`;
+
+    const payload = new URLSearchParams({
+      username: TMS_USER,
+      password: TMS_PASS,
+      UserID: "null",
+      UserToken: "null",
+      pageName: "/index.html"
+    });
+
+    const resp = await fetch(loginURL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: payload
+    });
+
+    const cookie = resp.headers.get("set-cookie");
+    const data = await resp.json();
+
+    return {
+      cookie,
+      userId: data.UserID || "",
+      userToken: data.UserToken || ""
+    };
+  }
+
+  /**
+   * CALL TMS STATUS API
+   */
+  async function getTMSStatus(pro, cookie) {
+    const url = `${TMS_BASE_URL}/write_new/search_order_basic_v6.php`;
+
+    const payload = new URLSearchParams({
+      input_filter_pro: pro,
+      group_id: TMS_GROUP_ID || ""
+    });
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        Cookie: cookie,
+        Origin: TMS_BASE_URL,
+        Referer: TMS_BASE_URL,
+        "X-Requested-With": "XMLHttpRequest"
+      },
+      body: payload
+    });
+
+    return resp.json();
+  }
+
+  // LOGIN FIRST
   let login;
   try {
-    login = await loginTMS(username, password);
-  } catch (e) {
-    res.status(500).json({ error: "TMS login failed", details: e.message });
-    return;
+    login = await loginTMS();
+  } catch (err) {
+    return res.status(500).json({ error: "TMS login failed", details: err.message });
   }
 
   const results = [];
@@ -117,7 +112,6 @@ export default async function handler(req, res) {
     try {
       const tmsResp = await getTMSStatus(pro, login.cookie);
 
-      // If no results returned
       if (!tmsResp?.data || tmsResp.data.length === 0) {
         results.push({
           pro,
@@ -127,13 +121,12 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // TMS returns an array; take first record
-      const record = tmsResp.data[0];
+      const row = tmsResp.data[0];
 
       results.push({
         pro,
-        status: mapTMSStatus(record.StatusCode),
-        order_id: record.OrderID || ""
+        status: mapTMSStatus(row.StatusCode),
+        order_id: row.OrderID || ""
       });
 
     } catch (err) {
@@ -146,5 +139,5 @@ export default async function handler(req, res) {
     }
   }
 
-  res.status(200).json({ results });
+  return res.status(200).json({ results });
 }
