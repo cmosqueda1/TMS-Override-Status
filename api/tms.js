@@ -21,8 +21,8 @@ const TMS_TRACE_URL = `${TMS_BASE}/write_new/get_tms_trace.php`;
 const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`;
 
 // Defaults to your known credentials if env not set
-const TMS_USER     = process.env.TMS_USER || "cmosqueda";
-const TMS_PASS     = process.env.TMS_PASS || "UWF2NjUyODk="; // base64 as UI
+const TMS_USER     = process.env.TMS_USER || "system.account@unisco.com";
+const TMS_PASS     = process.env.TMS_PASS || "VW5pczEyMyE="; // base64 as UI
 const TMS_GROUP_ID = process.env.TMS_GROUP_ID || "28";
 
 // =======================
