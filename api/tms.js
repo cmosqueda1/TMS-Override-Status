@@ -7,47 +7,41 @@
 // =======================
 const cleanPro = (v) => String(v ?? "").trim();
 const cleanPu  = (v) => String(v ?? "").trim();
-const DEBUG    = true;
+const DEBUG    = process.env.DEBUG === "true";
 
 const safeLog = (label, payload) => {
   if (!DEBUG) return;
   console.log(`\n=== ${label} ===\n`, payload);
 };
 
-const TMS_BASE      = "https://tms.freightapp.com";
+const TMS_BASE      = process.env.TMS_BASE_URL || "https://tms.freightapp.com";
 const TMS_LOGIN_URL = `${TMS_BASE}/write/check_login.php`;
 const TMS_GROUP_URL = `${TMS_BASE}/write_new/write_change_user_group.php`;
 const TMS_TRACE_URL = `${TMS_BASE}/write_new/get_tms_trace.php`;
 const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`;
 
 // =======================
-// ENV CONFIG (NO FALLBACKS)
+// ENV VARIABLES ONLY
+// NO FALLBACKS
 // =======================
-const TMS_BASE = process.env.TMS_BASE_URL || "https://tms.freightapp.com";
-const TMS_LOGIN_URL = `${TMS_BASE}/write/check_login.php`;
-const TMS_GROUP_URL = `${TMS_BASE}/write_new/write_change_user_group.php`;
-const TMS_TRACE_URL = `${TMS_BASE}/write_new/get_tms_trace.php`;
-const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`;
-
-const TMS_USER = process.env.TMS_USER;
-const TMS_PASS = process.env.TMS_PASS;
+const TMS_USER     = process.env.TMS_USER;
+const TMS_PASS     = process.env.TMS_PASS;
 const TMS_GROUP_ID = process.env.TMS_GROUP_ID;
 
-// 🚨 HARD FAIL (prevents silent wrong creds)
 if (!TMS_USER || !TMS_PASS || !TMS_GROUP_ID) {
   throw new Error(
-    `Missing env vars:
-     TMS_USER=${!!TMS_USER}
-     TMS_PASS=${!!TMS_PASS}
-     TMS_GROUP_ID=${!!TMS_GROUP_ID}`
+    `Missing required environment variables: ` +
+    `TMS_USER=${!!TMS_USER}, ` +
+    `TMS_PASS=${!!TMS_PASS}, ` +
+    `TMS_GROUP_ID=${!!TMS_GROUP_ID}`
   );
 }
 
-// Safe debug
-console.log("TMS ENV LOADED", {
+safeLog("TMS ENV LOADED", {
   user: TMS_USER,
   hasPass: !!TMS_PASS,
-  group: TMS_GROUP_ID
+  groupId: TMS_GROUP_ID,
+  base: TMS_BASE
 });
 
 // =======================
@@ -115,7 +109,6 @@ function extractCookieHeader(response) {
 
   if (!raw) return "";
 
-  // Handle a combined cookie header string by keeping just name=value pairs
   return raw
     .split(/,(?=\s*[A-Za-z0-9_\-]+=)/)
     .map((part) => part.split(";")[0].trim())
@@ -140,7 +133,6 @@ function mergeCookieHeaders(...cookieStrings) {
       const name = part.slice(0, eq).trim();
       const value = part.slice(eq + 1).trim();
 
-      // Skip common non-cookie attributes if they sneak in
       if (
         /^(Path|Expires|Max-Age|Domain|Secure|HttpOnly|SameSite)$/i.test(name)
       ) {
@@ -305,7 +297,8 @@ async function authTms() {
 
   safeLog("TMS LOGIN REQUEST", {
     url: TMS_LOGIN_URL,
-    username: TMS_USER
+    username: TMS_USER,
+    hasPassword: !!TMS_PASS
   });
 
   const r = await fetch(TMS_LOGIN_URL, {
@@ -337,10 +330,9 @@ async function authTms() {
     throw new Error(`TMS auth: missing UserID/UserToken | raw=${raw}`);
   }
 
-  const cookiesAfterGroup = await tmsChangeGroup(uid, token, cookiesFromLogin);
-  const mergedCookies = mergeCookieHeaders(cookiesFromLogin, cookiesAfterGroup);
+  await tmsChangeGroup(uid, token, cookiesFromLogin);
 
-  return { userId: uid, token, cookies: mergedCookies };
+  return { userId: uid, token, cookies: cookiesFromLogin };
 }
 
 async function tmsChangeGroup(userId, userToken, cookieHeader = "") {
@@ -381,7 +373,8 @@ async function tmsChangeGroup(userId, userToken, cookieHeader = "") {
     console.warn("TMS group change HTTP", r.status, raw);
   }
 
-  return extractCookieHeader(r);
+  const cookiesFromGroupChange = extractCookieHeader(r);
+  return mergeCookieHeaders(cookieHeader, cookiesFromGroupChange);
 }
 
 /**
