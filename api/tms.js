@@ -7,23 +7,25 @@
 // =======================
 const cleanPro = (v) => String(v ?? "").trim();
 const cleanPu  = (v) => String(v ?? "").trim();
-const DEBUG    = process.env.DEBUG === "true";
+const DEBUG    = true;
 
 const safeLog = (label, payload) => {
   if (!DEBUG) return;
   console.log(`\n=== ${label} ===\n`, payload);
 };
 
-const TMS_BASE      = process.env.TMS_BASE_URL || "https://tms.freightapp.com";
+const TMS_BASE      = "https://tms.freightapp.com";
 const TMS_LOGIN_URL = `${TMS_BASE}/write/check_login.php`;
 const TMS_GROUP_URL = `${TMS_BASE}/write_new/write_change_user_group.php`;
 const TMS_TRACE_URL = `${TMS_BASE}/write_new/get_tms_trace.php`;
 const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`;
 
-// Defaults to your known credentials if env not set
-const TMS_USER     = process.env.TMS_USER || "system.account@unisco.com";
-const TMS_PASS     = process.env.TMS_PASS || "VW5pczEyMyE="; // base64 as UI
-const TMS_GROUP_ID = process.env.TMS_GROUP_ID || "28";
+// =======================
+// HARDCODED CREDENTIALS ONLY
+// =======================
+const TMS_USER     = "system.account@unisco.com";
+const TMS_PASS     = "VW5pczEyMyE="; // base64 as UI
+const TMS_GROUP_ID = "28";
 
 // =======================
 // Stage mapping (code -> target status / description)
@@ -80,9 +82,66 @@ function deriveTargetStatus(stageInfo, override) {
 }
 
 // =======================
+// Cookie helpers
+// =======================
+function extractCookieHeader(response) {
+  const raw =
+    response.headers.get("set-cookie") ||
+    response.headers.get("Set-Cookie") ||
+    "";
+
+  if (!raw) return "";
+
+  // Handle a combined cookie header string by keeping just name=value pairs
+  return raw
+    .split(/,(?=\s*[A-Za-z0-9_\-]+=)/)
+    .map((part) => part.split(";")[0].trim())
+    .filter(Boolean)
+    .join("; ");
+}
+
+function mergeCookieHeaders(...cookieStrings) {
+  const jar = new Map();
+
+  for (const cookieString of cookieStrings) {
+    if (!cookieString) continue;
+
+    const parts = String(cookieString)
+      .split(";")
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    for (const part of parts) {
+      const eq = part.indexOf("=");
+      if (eq <= 0) continue;
+      const name = part.slice(0, eq).trim();
+      const value = part.slice(eq + 1).trim();
+
+      // Skip common non-cookie attributes if they sneak in
+      if (
+        /^(Path|Expires|Max-Age|Domain|Secure|HttpOnly|SameSite)$/i.test(name)
+      ) {
+        continue;
+      }
+
+      jar.set(name, value);
+    }
+  }
+
+  return Array.from(jar.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+// =======================
 // Vercel handler
 // =======================
 export default async function handler(req, res) {
+  safeLog("HANDLER HIT", {
+    method: req.method,
+    body: req.body
+  });
+
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
@@ -171,7 +230,7 @@ export default async function handler(req, res) {
         r.override_ok = out.ok;
         r.override_skipped = !!out.skipped;
         if (!out.ok && !r.override_error) {
-          r.override_error = out.error || out.reason || "Override failed";
+          r.override_error = out.error || out.reason || out.raw || "Override failed";
         }
       } catch (err) {
         r.override_ok = false;
@@ -221,7 +280,10 @@ async function authTms() {
   body.set("UserToken", "null");
   body.set("pageName", "/index.html");
 
-  safeLog("TMS LOGIN REQUEST", { url: TMS_LOGIN_URL });
+  safeLog("TMS LOGIN REQUEST", {
+    url: TMS_LOGIN_URL,
+    username: TMS_USER
+  });
 
   const r = await fetch(TMS_LOGIN_URL, {
     method: "POST",
@@ -236,45 +298,67 @@ async function authTms() {
     redirect: "follow"
   });
 
-  if (!r.ok) throw new Error(`TMS auth HTTP ${r.status}`);
-  const j = await r.json().catch(() => ({}));
+  const raw = await r.text();
+  safeLog("TMS LOGIN RAW RESPONSE", { status: r.status, raw });
+
+  if (!r.ok) throw new Error(`TMS auth HTTP ${r.status} | ${raw}`);
+
+  const cookiesFromLogin = extractCookieHeader(r);
+
+  const j = JSON.parse(raw || "{}");
 
   const uid   = j.UserID    ?? j.user_id   ?? null;
   const token = j.UserToken ?? j.userToken ?? null;
 
   if (!uid || !token) {
-    throw new Error("TMS auth: missing UserID/UserToken");
+    throw new Error(`TMS auth: missing UserID/UserToken | raw=${raw}`);
   }
 
-  await tmsChangeGroup(uid, token);
+  const cookiesAfterGroup = await tmsChangeGroup(uid, token, cookiesFromLogin);
+  const mergedCookies = mergeCookieHeaders(cookiesFromLogin, cookiesAfterGroup);
 
-  return { userId: uid, token };
+  return { userId: uid, token, cookies: mergedCookies };
 }
 
-async function tmsChangeGroup(userId, userToken) {
+async function tmsChangeGroup(userId, userToken, cookieHeader = "") {
   const body = new URLSearchParams();
   body.set("group_id", String(TMS_GROUP_ID));
   body.set("UserID", String(userId));
   body.set("UserToken", String(userToken));
   body.set("pageName", "dashboard");
 
-  safeLog("TMS CHANGE GROUP REQUEST", { url: TMS_GROUP_URL });
+  safeLog("TMS CHANGE GROUP REQUEST", {
+    url: TMS_GROUP_URL,
+    userId,
+    groupId: TMS_GROUP_ID
+  });
+
+  const headers = {
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://tms.freightapp.com",
+    "Referer": "https://tms.freightapp.com/dev.html",
+    "User-Agent": "Mozilla/5.0"
+  };
+
+  if (cookieHeader) {
+    headers["Cookie"] = cookieHeader;
+  }
 
   const r = await fetch(TMS_GROUP_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-Requested-With": "XMLHttpRequest",
-      "Origin": "https://tms.freightapp.com",
-      "Referer": "https://tms.freightapp.com/dev.html",
-      "User-Agent": "Mozilla/5.0"
-    },
+    headers,
     body
   });
 
+  const raw = await r.text();
+  safeLog("TMS CHANGE GROUP RAW RESPONSE", { status: r.status, raw });
+
   if (!r.ok) {
-    console.warn("TMS group change HTTP", r.status);
+    console.warn("TMS group change HTTP", r.status, raw);
   }
+
+  return extractCookieHeader(r);
 }
 
 /**
@@ -282,7 +366,7 @@ async function tmsChangeGroup(userId, userToken) {
  * Returns Map<cleanPro, row>
  */
 async function tmsTraceForPros(auth, pros) {
-  const { userId, token } = auth;
+  const { userId, token, cookies } = auth;
   const body = new URLSearchParams();
 
   body.set("input_filter_tracking_num", "");
@@ -369,23 +453,35 @@ async function tmsTraceForPros(auth, pros) {
 
   safeLog("TMS TRACE REQUEST", { url: TMS_TRACE_URL });
 
+  const headers = {
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://tms.freightapp.com",
+    "Referer": "https://tms.freightapp.com/dev.html",
+    "User-Agent": "Mozilla/5.0"
+  };
+
+  if (cookies) {
+    headers["Cookie"] = cookies;
+  }
+
   const r = await fetch(TMS_TRACE_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-Requested-With": "XMLHttpRequest",
-      "Origin": "https://tms.freightapp.com",
-      "Referer": "https://tms.freightapp.com/dev.html",
-      "User-Agent": "Mozilla/5.0"
-    },
+    headers,
     body
   });
 
+  const raw = await r.text();
+  safeLog("TMS TRACE RAW RESPONSE", {
+    status: r.status,
+    raw: raw?.slice(0, 1000)
+  });
+
   if (!r.ok) {
-    throw new Error(`TMS trace HTTP ${r.status}`);
+    throw new Error(`TMS trace HTTP ${r.status} | ${raw}`);
   }
 
-  const j = await r.json().catch(() => ({}));
+  const j = JSON.parse(raw || "{}");
 
   let rows = null;
   if (Array.isArray(j)) rows = j;
@@ -412,7 +508,7 @@ async function tmsTraceForPros(auth, pros) {
  * Override stage for a single order using write_update_tms_order_stage.php
  */
 async function runTmsOverride(auth, row, override, stageInfoFromCaller) {
-  const { userId, token } = auth;
+  const { userId, token, cookies } = auth;
   const orderId = row.tms_order_id;
 
   if (!orderId) {
@@ -441,15 +537,21 @@ async function runTmsOverride(auth, row, override, stageInfoFromCaller) {
     targetStatus
   });
 
+  const headers = {
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://tms.freightapp.com",
+    "Referer": `https://tms.freightapp.com/dashboard_tms_order.php?order_id=${orderId}`,
+    "User-Agent": "Mozilla/5.0"
+  };
+
+  if (cookies) {
+    headers["Cookie"] = cookies;
+  }
+
   const r = await fetch(TMS_OVERRIDE_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-Requested-With": "XMLHttpRequest",
-      "Origin": "https://tms.freightapp.com",
-      "Referer": `https://tms.freightapp.com/dashboard_tms_order.php?order_id=${orderId}`,
-      "User-Agent": "Mozilla/5.0"
-    },
+    headers,
     body
   });
 
