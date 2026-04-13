@@ -21,11 +21,34 @@ const TMS_TRACE_URL = `${TMS_BASE}/write_new/get_tms_trace.php`;
 const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`;
 
 // =======================
-// HARDCODED CREDENTIALS ONLY
+// ENV CONFIG (NO FALLBACKS)
 // =======================
-const TMS_USER     = "system.account@unisco.com";
-const TMS_PASS     = "VW5pczEyMyE="; // base64 as UI
-const TMS_GROUP_ID = "28";
+const TMS_BASE = process.env.TMS_BASE_URL || "https://tms.freightapp.com";
+const TMS_LOGIN_URL = `${TMS_BASE}/write/check_login.php`;
+const TMS_GROUP_URL = `${TMS_BASE}/write_new/write_change_user_group.php`;
+const TMS_TRACE_URL = `${TMS_BASE}/write_new/get_tms_trace.php`;
+const TMS_OVERRIDE_URL = `${TMS_BASE}/write/write_update_tms_order_stage.php`;
+
+const TMS_USER = process.env.TMS_USER;
+const TMS_PASS = process.env.TMS_PASS;
+const TMS_GROUP_ID = process.env.TMS_GROUP_ID;
+
+// 🚨 HARD FAIL (prevents silent wrong creds)
+if (!TMS_USER || !TMS_PASS || !TMS_GROUP_ID) {
+  throw new Error(
+    `Missing env vars:
+     TMS_USER=${!!TMS_USER}
+     TMS_PASS=${!!TMS_PASS}
+     TMS_GROUP_ID=${!!TMS_GROUP_ID}`
+  );
+}
+
+// Safe debug
+console.log("TMS ENV LOADED", {
+  user: TMS_USER,
+  hasPass: !!TMS_PASS,
+  group: TMS_GROUP_ID
+});
 
 // =======================
 // Stage mapping (code -> target status / description)
